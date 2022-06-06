@@ -16,7 +16,7 @@ namespace PriceAggregator
     [ContractPermission("*")]
     public class PriceAggregator : SmartContract
     {
-        [InitialValue("0x06a0a384776ac8882583e9b39254c05622b6e684", ContractParameterType.Hash160)]
+        [InitialValue("0x2b76901a263e1b1d6742a7bfd167d3925bbf18c6", ContractParameterType.Hash160)]
         static readonly UInt160 OrderBook = default;
 
         [InitialValue("0x4ca98851d402336d44f264a7ce7b1b4443a2f53f", ContractParameterType.Hash160)]
@@ -39,30 +39,146 @@ namespace PriceAggregator
         public static event FaultEvent onFault;
         public delegate void FaultEvent(string message, params object[] paras);
 
-        public static bool SwapTokenInForTokenOutWithOrderBook(UInt160 sender, BigInteger amountIn, BigInteger amountOutMin, bool isAtoB, BigInteger deadLine)
+        /// <summary>
+        /// Swap with both AMM and OrderBook
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="amountIn"></param>
+        /// <param name="amountOutMin"></param>
+        /// <param name="isAtoB"></param>
+        /// <param name="deadLine"></param>
+        public static bool SwapTokenInForTokenOutWithOrderBook(UInt160 sender, BigInteger amountInMax, BigInteger amountOutMin, bool isAtoB, BigInteger deadLine)
         {
             Assert(Runtime.CheckWitness(sender), "Forbidden");
             Assert((BigInteger)Runtime.Time <= deadLine, "Exceeded the deadline");
 
-            // AMM->OB->AMM...
+            var tokenIn = isAtoB ? TokenA : TokenB;
+            var tokenOut = isAtoB ? TokenB : TokenA;
 
-            // Deal left in AMM
+            var quoteDecimals = GetQuoteDecimals(tokenIn, tokenOut);
 
-            return false;
+            var leftIn = amountInMax;
+            BigInteger totalOut = 0;
+            while (leftIn > 0)
+            {
+                var bookPrice = GetOrderBookPrice(tokenIn, tokenOut, !isAtoB);
+                if (bookPrice == 0) break;
+
+                // First AMM
+                var ammReverse = GetReserves(tokenIn, tokenOut);
+                var ammPrice = GetAMMPrice(isAtoB ? ammReverse[0] : ammReverse[1], isAtoB ? ammReverse[1] : ammReverse[0], quoteDecimals);
+                if ((isAtoB && ammPrice > bookPrice) || (!isAtoB && ammPrice < bookPrice))
+                {
+                    var amountToPool = GetAmountInTillPrice(!isAtoB, bookPrice, quoteDecimals, ammReverse[0], ammReverse[1]);
+                    if (leftIn <= amountToPool)
+                    {
+                        var amountOut = GetAMMAmountOut(leftIn, ammReverse[0], ammReverse[1]);
+                        SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, leftIn);
+                        Swap(amountOut, isAtoB, sender);
+                        leftIn = 0;
+                        totalOut += amountOut;
+                        break;
+                    }
+                    else
+                    {
+                        var amountOut = GetAMMAmountOut(amountToPool, ammReverse[0], ammReverse[1]);
+                        SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountToPool);
+                        Swap(amountOut, isAtoB, sender);
+                        leftIn -= amountToPool;
+                        totalOut += amountOut;
+                    }
+                }
+
+                // Then book
+                var amountOutBook = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, leftIn)[1];
+                leftIn = SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, leftIn);
+                totalOut += amountOutBook;
+            }
+
+            // Finally AMM
+            if (leftIn > 0)
+            {
+                var ammReverse = GetReserves(tokenIn, tokenOut);
+                var amountOut = GetAMMAmountOut(leftIn, ammReverse[0], ammReverse[1]);
+                SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, leftIn);
+                Swap(amountOut, isAtoB, sender);
+                totalOut += amountOut;
+            }
+            Assert(totalOut >= amountOutMin, "Insufficient AmountOut");
+            return true;
         }
 
-        public static bool SwapTokenOutForTokenInWithOrderBook(UInt160 sender, BigInteger amountOut, BigInteger amountInMax, bool isAtoB, BigInteger deadLine)
+        public static bool SwapTokenOutForTokenInWithOrderBook(UInt160 sender, BigInteger amountOutMin, BigInteger amountInMax, bool isAtoB, BigInteger deadLine)
         {
             Assert(Runtime.CheckWitness(sender), "Forbidden");
             Assert((BigInteger)Runtime.Time <= deadLine, "Exceeded the deadline");
 
-            // AMM->OB->AMM...
+            var tokenIn = isAtoB ? TokenA : TokenB;
+            var tokenOut = isAtoB ? TokenB : TokenA;
 
-            // Deal left in AMM
+            var quoteDecimals = GetQuoteDecimals(tokenIn, tokenOut);
 
-            return false;
+            var leftOut = amountOutMin;
+            BigInteger totalIn = 0;
+            while (leftOut > 0)
+            {
+                var bookPrice = GetOrderBookPrice(tokenIn, tokenOut, !isAtoB);
+                if (bookPrice == 0) break;
+
+                // First AMM
+                var ammReverse = GetReserves(tokenIn, tokenOut);
+                var ammPrice = GetAMMPrice(isAtoB ? ammReverse[0] : ammReverse[1], isAtoB ? ammReverse[1] : ammReverse[0], quoteDecimals);
+                if ((isAtoB && ammPrice > bookPrice) || (!isAtoB && ammPrice < bookPrice))
+                {
+                    var amountToPool = GetAmountInTillPrice(!isAtoB, bookPrice, quoteDecimals, ammReverse[0], ammReverse[1]);
+                    var amountOutPool = GetAMMAmountOut(amountToPool, ammReverse[0], ammReverse[1]);
+                    if (amountOutPool >= leftOut)
+                    {
+                        var amountIn = GetAMMAmountIn(leftOut, ammReverse[0], ammReverse[1]);
+                        SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountIn);
+                        Swap(leftOut, isAtoB, sender);
+                        leftOut = 0;
+                        totalIn += amountIn;
+                        break;
+                    }
+                    else
+                    {
+                        SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountToPool);
+                        Swap(amountOutPool, isAtoB, sender);
+                        leftOut -= amountOutPool;
+                        totalIn += amountToPool;
+                    }
+                }
+
+                // Then book
+                var amountToBook = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut)[1];
+                var amountOutBook = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, amountToBook)[1];
+                Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, amountToBook) == 0, "");
+                leftOut -= amountOutBook;
+                totalIn += amountToBook;
+            }
+
+            // Finally AMM
+            if (leftOut > 0)
+            {
+                var ammReverse = GetReserves(tokenIn, tokenOut);
+                var amountIn = GetAMMAmountIn(leftOut, ammReverse[0], ammReverse[1]);
+                SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountIn);
+                Swap(leftOut, isAtoB, sender);
+                totalIn += amountIn;
+            }
+            Assert(totalIn <= amountInMax, "Excessive AmountIn");
+            return true;
         }
 
+        /// <summary>
+        /// Native Router methods
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="amountIn"></param>
+        /// <param name="amountOutMin"></param>
+        /// <param name="isAtoB"></param>
+        /// <param name="deadLine"></param>
         public static bool SwapTokenInForTokenOut(UInt160 sender, BigInteger amountIn, BigInteger amountOutMin, bool isAtoB, BigInteger deadLine)
         {
             Assert(Runtime.CheckWitness(sender), "Forbidden");
@@ -73,7 +189,7 @@ namespace PriceAggregator
             Assert(amountOut >= amountOutMin, "Insufficient AmountOut");
 
             SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountIn);
-            Swap(amountIn, amountOut, isAtoB, sender);
+            Swap(amountOut, isAtoB, sender);
             return true;
         }
 
@@ -87,24 +203,31 @@ namespace PriceAggregator
             Assert(amountIn <= amountInMax, "Excessive AmountIn");
 
             SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountIn);
-            Swap(amountIn, amountOut, isAtoB, sender);
+            Swap(amountOut, isAtoB, sender);
             return true;
         }
 
-        public static BigInteger GetAmountOutWithOrderBook(BigInteger amountIn, bool isAtoB)
+        /// <summary>
+        /// Get amountOut with both AMM and OrderBook
+        /// </summary>
+        /// <param name="amountInMax"></param>
+        /// <param name="isAtoB"></param>
+        [Safe]
+        public static BigInteger GetAmountOutWithOrderBook(BigInteger amountInMax, bool isAtoB)
         {
             var tokenIn = isAtoB ? TokenA : TokenB;
             var tokenOut = isAtoB ? TokenB : TokenA;
 
             var quoteDecimals = GetQuoteDecimals(tokenIn, tokenOut);
-            var bookPrice = GetOrderBookPrice(tokenIn, tokenOut);
+            var bookPrice = GetOrderBookPrice(tokenIn, tokenOut, !isAtoB);
             var ammReverse = GetReserves(tokenIn, tokenOut);
 
-            var leftIn = amountIn;
+            var leftIn = amountInMax;
             BigInteger totalOut = 0;
             while (bookPrice > 0 && leftIn > 0)
             {
-                var ammPrice = GetAMMPrice(quoteDecimals);
+                var ammPrice = GetAMMPrice(isAtoB ? ammReverse[0] : ammReverse[1], isAtoB ? ammReverse[1] : ammReverse[0], quoteDecimals);
+
                 // First AMM
                 if ((isAtoB && ammPrice > bookPrice) || (!isAtoB && ammPrice < bookPrice))
                 {
@@ -127,9 +250,10 @@ namespace PriceAggregator
                 }
 
                 // Then book
-                var result = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, leftIn);
+                var result = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, leftIn);
                 leftIn = result[0];
                 totalOut += result[1];
+                bookPrice = GetOrderBookNextPrice(tokenIn, tokenOut, !isAtoB, bookPrice);
             }
 
             // Finally AMM
@@ -141,20 +265,27 @@ namespace PriceAggregator
             return totalOut;
         }
 
-        public static BigInteger GetAmountInWithOrderBook(BigInteger amountOut, bool isAtoB)
+        /// <summary>
+        /// Get amountIn with both AMM and OrderBook
+        /// </summary>
+        /// <param name="amountOutMin"></param>
+        /// <param name="isAtoB"></param>
+        [Safe]
+        public static BigInteger GetAmountInWithOrderBook(BigInteger amountOutMin, bool isAtoB)
         {
             var tokenIn = isAtoB ? TokenA : TokenB;
             var tokenOut = isAtoB ? TokenB : TokenA;
 
             var quoteDecimals = GetQuoteDecimals(tokenIn, tokenOut);
-            var bookPrice = GetOrderBookPrice(tokenIn, tokenOut);
+            var bookPrice = GetOrderBookPrice(tokenIn, tokenOut, !isAtoB);
             var ammReverse = GetReserves(tokenIn, tokenOut);
 
-            var leftOut = amountOut;
+            var leftOut = amountOutMin;
             BigInteger totalIn = 0;
             while (bookPrice > 0 && leftOut > 0)
             {
-                var ammPrice = GetAMMPrice(quoteDecimals);
+                var ammPrice = GetAMMPrice(isAtoB ? ammReverse[0] : ammReverse[1], isAtoB ? ammReverse[1] : ammReverse[0], quoteDecimals);
+
                 // First AMM
                 if ((isAtoB && ammPrice > bookPrice) || (!isAtoB && ammPrice < bookPrice))
                 {
@@ -177,9 +308,10 @@ namespace PriceAggregator
                 }
 
                 // Then book
-                var result = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, leftOut);
+                var result = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut);
                 leftOut = result[0];
                 totalIn += result[1];
+                bookPrice = GetOrderBookNextPrice(tokenIn, tokenOut, !isAtoB, bookPrice);
             }
 
             // Finally AMM
@@ -187,10 +319,19 @@ namespace PriceAggregator
             {
                 totalIn += GetAMMAmountIn(leftOut, ammReverse[0], ammReverse[1]);
             }
-
             return totalIn;
         }
 
+        /// <summary>
+        /// Swap until reverseQuote/reverseBase equals price
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="amountInMax"></param>
+        /// <param name="amountOutMin"></param>
+        /// <param name="price"></param>
+        /// <param name="quoteDecimals"></param>
+        /// <param name="isAtoB"></param>
+        /// <param name="deadLine"></param>
         public static bool SwapTillPrice(UInt160 sender, BigInteger amountInMax, BigInteger amountOutMin, BigInteger price, uint quoteDecimals, bool isAtoB, BigInteger deadLine)
         {
             Assert(Runtime.CheckWitness(sender), "Forbidden");
@@ -205,11 +346,20 @@ namespace PriceAggregator
             Assert(amountIn <= amountInMax, "Excessive AmountIn", amountIn);
 
             SafeTransfer(isAtoB ? TokenA : TokenB, sender, SwapPair, amountIn);
-            Swap(amountIn, amountOut, isAtoB, sender);
+            Swap(amountOut, isAtoB, sender);
 
             return true;
         }
 
+        /// <summary>
+        /// Get amountIn for AMM to reach the book price, based on reverses
+        /// </summary>
+        /// <param name="isBuy"></param>
+        /// <param name="price"></param>
+        /// <param name="quoteDecimals"></param>
+        /// <param name="reserveIn"></param>
+        /// <param name="reserveOut"></param>
+        [Safe]
         public static BigInteger GetAmountInTillPrice(bool isBuy, BigInteger price, uint quoteDecimals, BigInteger reserveIn, BigInteger reserveOut)
         {
             var reverseInNew = BigInteger.Pow(reserveIn, 2) * 9 / 1000000;
@@ -219,6 +369,13 @@ namespace PriceAggregator
             return reverseInNew - reserveIn;
         }
 
+        /// <summary>
+        /// Native Router methods
+        /// </summary>
+        /// <param name="amountOut"></param>
+        /// <param name="reserveIn"></param>
+        /// <param name="reserveOut"></param>
+        [Safe]
         public static BigInteger GetAMMAmountIn(BigInteger amountOut, BigInteger reserveIn, BigInteger reserveOut)
         {
             Assert(amountOut > 0 && reserveIn > 0 && reserveOut > 0, "AmountOut Must > 0");
@@ -228,6 +385,13 @@ namespace PriceAggregator
             return amountIn;
         }
 
+        /// <summary>
+        /// Native Router methods
+        /// </summary>
+        /// <param name="amountIn"></param>
+        /// <param name="reserveIn"></param>
+        /// <param name="reserveOut"></param>
+        [Safe]
         public static BigInteger GetAMMAmountOut(BigInteger amountIn, BigInteger reserveIn, BigInteger reserveOut)
         {
             Assert(amountIn > 0 && reserveIn > 0 && reserveOut > 0, "AmountIn Must > 0");
@@ -238,22 +402,27 @@ namespace PriceAggregator
             return amountOut;
         }
 
-        private static BigInteger[] GetOrderBookAmountIn(UInt160 tokenFrom, UInt160 tokenTo, BigInteger price, BigInteger amountIn)
+        private static BigInteger[] GetOrderBookAmountIn(UInt160 tokenFrom, UInt160 tokenTo, BigInteger startPrice, BigInteger endPrice, BigInteger amountInMax)
         {
-            return (BigInteger[])Contract.Call(OrderBook, "getAmountIn", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, price, amountIn});
+            return (BigInteger[])Contract.Call(OrderBook, "getAmountIn", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, startPrice, endPrice, amountInMax });
         }
 
-        private static BigInteger[] GetOrderBookAmountOut(UInt160 tokenFrom, UInt160 tokenTo, BigInteger price, BigInteger amountOut)
+        private static BigInteger[] GetOrderBookAmountOut(UInt160 tokenFrom, UInt160 tokenTo, BigInteger startPrice, BigInteger endPrice, BigInteger amountOutMin)
         {
-            return (BigInteger[])Contract.Call(OrderBook, "getAmountOut", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, price, amountOut});
+            return (BigInteger[])Contract.Call(OrderBook, "getAmountOut", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, startPrice, endPrice, amountOutMin });
+        }
+
+        private static BigInteger[] MatchSwapOrder(UInt160 tokenFrom, UInt160 tokenTo, UInt160 sender, bool isBuy, BigInteger price, BigInteger amount)
+        {
+            return (BigInteger[])Contract.Call(OrderBook, "matchOrder", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, isBuy, price, amount});
         }
 
         private static BigInteger SendSwapOrder(UInt160 tokenFrom, UInt160 tokenTo, UInt160 sender, bool isBuy, BigInteger price, BigInteger amount)
         {
-            return (BigInteger)Contract.Call(OrderBook, "dealMarketOrder", CallFlags.All, new object[] { tokenFrom, tokenTo, sender, isBuy, price, amount});
+            return (BigInteger)Contract.Call(OrderBook, "dealMarketOrder", CallFlags.All, new object[] { tokenFrom, tokenTo, sender, isBuy, price, amount });
         }
 
-        private static void Swap(BigInteger amountIn, BigInteger amountOut, bool isAtoB, UInt160 toAddress)
+        private static void Swap(BigInteger amountOut, bool isAtoB, UInt160 toAddress)
         {
             var input = isAtoB ? TokenA : TokenB;
             var output = isAtoB ? TokenB : TokenA;
@@ -279,9 +448,14 @@ namespace PriceAggregator
             return reverseQuote * BigInteger.Pow(10, (int)quoteDecimals) / reverseBase;
         }
 
-        public static BigInteger GetOrderBookPrice(UInt160 tokenFrom, UInt160 tokenTo)
+        public static BigInteger GetOrderBookPrice(UInt160 tokenFrom, UInt160 tokenTo, bool isBuy)
         {
-            return (BigInteger)Contract.Call(OrderBook, "getMarketPrice", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo });
+            return (BigInteger)Contract.Call(OrderBook, "getMarketPrice", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, isBuy });
+        }
+
+        public static BigInteger GetOrderBookNextPrice(UInt160 tokenFrom, UInt160 tokenTo, bool isBuy, BigInteger price)
+        {
+            return (BigInteger)Contract.Call(OrderBook, "getNextPrice", CallFlags.ReadOnly, new object[] { tokenFrom, tokenTo, isBuy, price });
         }
 
         private static BigInteger[] GetReserves(UInt160 tokenA, UInt160 tokenB)
