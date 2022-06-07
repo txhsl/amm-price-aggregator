@@ -67,6 +67,7 @@ namespace PriceAggregator
                 // First AMM
                 var ammReverse = GetReserves(tokenIn, tokenOut);
                 var ammPrice = GetAMMPrice(isAtoB ? ammReverse[0] : ammReverse[1], isAtoB ? ammReverse[1] : ammReverse[0], quoteDecimals);
+
                 if ((isAtoB && ammPrice > bookPrice) || (!isAtoB && ammPrice < bookPrice))
                 {
                     var amountToPool = GetAmountInTillPrice(!isAtoB, bookPrice, quoteDecimals, ammReverse[0], ammReverse[1]);
@@ -90,8 +91,12 @@ namespace PriceAggregator
                 }
 
                 // Then book
-                var amountOutBook = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, leftIn)[1];
-                leftIn = SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, leftIn);
+                var result = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, leftIn);
+                var amountToBook = leftIn - result[0];
+                var amountOutBook = result[1];
+                if (isAtoB) Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, amountToBook) == 0, "Not Full-filled");
+                else Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, (amountOutBook * 10000 + 9984) / 9985) == 0, "Not Full-filled");
+                leftIn -= amountToBook;
                 totalOut += amountOutBook;
             }
 
@@ -128,6 +133,7 @@ namespace PriceAggregator
                 // First AMM
                 var ammReverse = GetReserves(tokenIn, tokenOut);
                 var ammPrice = GetAMMPrice(isAtoB ? ammReverse[0] : ammReverse[1], isAtoB ? ammReverse[1] : ammReverse[0], quoteDecimals);
+
                 if ((isAtoB && ammPrice > bookPrice) || (!isAtoB && ammPrice < bookPrice))
                 {
                     var amountToPool = GetAmountInTillPrice(!isAtoB, bookPrice, quoteDecimals, ammReverse[0], ammReverse[1]);
@@ -151,9 +157,11 @@ namespace PriceAggregator
                 }
 
                 // Then book
-                var amountToBook = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut)[1];
+                var result = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut);
+                var amountToBook = result[1];
                 var amountOutBook = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, amountToBook)[1];
-                Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, amountToBook) == 0, "");
+                if (isAtoB) Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, amountToBook) == 0, "Not Full-filled");
+                else Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, (amountOutBook * 10000 + 9984) / 9985) == 0, "Not Full-filled");
                 leftOut -= amountOutBook;
                 totalIn += amountToBook;
             }
@@ -309,7 +317,7 @@ namespace PriceAggregator
 
                 // Then book
                 var result = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut);
-                leftOut = result[0];
+                leftOut -= GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, result[1])[1];
                 totalIn += result[1];
                 bookPrice = GetOrderBookNextPrice(tokenIn, tokenOut, !isAtoB, bookPrice);
             }
