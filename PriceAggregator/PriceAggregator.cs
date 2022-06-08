@@ -16,7 +16,7 @@ namespace PriceAggregator
     [ContractPermission("*")]
     public class PriceAggregator : SmartContract
     {
-        [InitialValue("0x2b76901a263e1b1d6742a7bfd167d3925bbf18c6", ContractParameterType.Hash160)]
+        [InitialValue("0x0b336d0dd0f8eb99f7d818d3f6f74d6d018851c9", ContractParameterType.Hash160)]
         static readonly UInt160 OrderBook = default;
 
         [InitialValue("0x4ca98851d402336d44f264a7ce7b1b4443a2f53f", ContractParameterType.Hash160)]
@@ -96,7 +96,7 @@ namespace PriceAggregator
                 var amountOutBook = result[1];
                 if (isAtoB) Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, amountToBook) == 0, "Not Full-filled");
                 else Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, (amountOutBook * 10000 + 9984) / 9985) == 0, "Not Full-filled");
-                leftIn -= amountToBook;
+                leftIn = result[0];
                 totalOut += amountOutBook;
             }
 
@@ -159,10 +159,10 @@ namespace PriceAggregator
                 // Then book
                 var result = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut);
                 var amountToBook = result[1];
-                var amountOutBook = GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, amountToBook)[1];
+                var amountOutBook = leftOut - result[0];
                 if (isAtoB) Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, amountToBook) == 0, "Not Full-filled");
                 else Assert(SendSwapOrder(tokenIn, tokenOut, sender, !isAtoB, bookPrice, (amountOutBook * 10000 + 9984) / 9985) == 0, "Not Full-filled");
-                leftOut -= amountOutBook;
+                leftOut = result[0];
                 totalIn += amountToBook;
             }
 
@@ -317,7 +317,7 @@ namespace PriceAggregator
 
                 // Then book
                 var result = GetOrderBookAmountIn(tokenIn, tokenOut, bookPrice, bookPrice, leftOut);
-                leftOut -= GetOrderBookAmountOut(tokenIn, tokenOut, bookPrice, bookPrice, result[1])[1];
+                leftOut = result[0];
                 totalIn += result[1];
                 bookPrice = GetOrderBookNextPrice(tokenIn, tokenOut, !isAtoB, bookPrice);
             }
